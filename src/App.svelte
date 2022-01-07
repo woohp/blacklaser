@@ -1,7 +1,7 @@
 <script lang="ts">
     import { Buffer } from 'buffer';
     import { onMount } from 'svelte';
-    import * as WebTorrent from 'webtorrent';
+    import type * as WebTorrent from 'webtorrent';
 
     interface Movie {
         background_image: string;
@@ -62,6 +62,7 @@
     let videoContainerEl: HTMLDivElement;
 
     onMount(async () => {
+        const WebTorrent = await import('webtorrent');
         const client: WebTorrent.Instance = new (WebTorrent as any)();
 
         const urlParams = new URLSearchParams(window.location.search);
@@ -225,6 +226,6 @@
     {#if movieTitle}
         <title>{ movieTitle }</title>
     {:else}
-        <title>SilverScreen</title>
+        <title>BlackLaser</title>
     {/if}
 </svelte:head>
