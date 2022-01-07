@@ -48,8 +48,16 @@
     let queryTerm: string = '';
     let movies: Movie[] = [];
     let movieInfoHash: string|null = null;
-    /* let movieTitle: string|null = null; */
+    let movieTitle: string|null = null;
     let loading: boolean = false;
+    let torrentInfo: {
+        numPeers: number,
+        progress: number,
+        downloadSpeed: number,
+        uploadSpeed: number,
+        downloaded: number,
+        length: number,
+    }|null = null;
 
     let videoContainerEl: HTMLDivElement;
 
@@ -60,11 +68,9 @@
 
         movieInfoHash = urlParams.get("m");
         if (movieInfoHash) {
-            /* movieTitle = urlParams.get("n") || ''; */
+            loading = true;
+            movieTitle = urlParams.get("n") || '';
 
-            const magnetURI = `https://yts.mx/torrent/download/${movieInfoHash}`;
-            const torrentResponse = await fetch(magnetURI);
-            const torrentContent = await torrentResponse.arrayBuffer();
             const opts = {
                 announce: [
                     'wss://tracker.btorrent.xyz',
@@ -73,7 +79,7 @@
                 ],
             };
 
-            client.add(Buffer.from(torrentContent), opts, (torrent: WebTorrent.Torrent) => {
+            client.add(await getTorrent(movieInfoHash), opts, (torrent: WebTorrent.Torrent) => {
                 // Got torrent metadata!
                 console.info('Client is downloading:', torrent.infoHash);
 
@@ -87,17 +93,24 @@
                         break;
                     }
                 }
+
+                setInterval(() => {
+                    torrentInfo = {
+                        downloadSpeed: torrent.downloadSpeed,
+                        uploadSpeed: torrent.uploadSpeed,
+                        progress: torrent.progress,
+                        numPeers: torrent.numPeers,
+                        downloaded: torrent.downloaded,
+                        length: torrent.length,
+                    };
+                }, 1000);
             });
-            loading = true;
 
             return;
         }
 
         queryTerm = urlParams.get("q") || '';
-        if (!queryTerm || queryTerm === '')
-            return;
-
-        const response = await fetch(`https://yts.mx/api/v2/list_movies.jsonp?query_term=${queryTerm}&quality=720p&sort_by=year`);
+        const response = await fetch(queryTerm === '' ? 'https://yts.mx/api/v2/list_movies.json?' : `https://yts.mx/api/v2/list_movies.jsonp?query_term=${queryTerm}&quality=720p&sort_by=year`);
         const responseBody = await response.json() as {data: {movies: Movie[]}};
         let dedupHistory: Set<number> = new Set();
         for (let movie of responseBody.data.movies) {
@@ -112,23 +125,66 @@
         console.debug(movies);
     });
 
+    async function getTorrent(infoHash: string): Promise<string|Buffer> {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 20_000);  // timeout in 20 seconds
+
+        try {
+            const torrentResponse = await fetch(`https://yts.mx/torrent/download/${infoHash}`, {signal: controller.signal});
+            clearTimeout(timeoutId);
+            return Buffer.from(await torrentResponse.arrayBuffer());
+        } catch (error) {
+            // if it failed to download the .torrent file, then use magnet link instead
+            if (error instanceof DOMException && error.name === 'AbortError')
+                return `magnet:?xt=urn:btih:${movieInfoHash}`;
+            else
+                throw error;
+        }
+    }
+
+    function humanFileSize(size: number): string {
+        if (size < 1_000)
+            return `${size.toFixed(2)} B`;
+        else if (size < 1_000_000)
+            return `${(size / 1_000).toFixed(2)} KB`;
+        else if (size < 1_000_000_000)
+            return `${(size / (1_000_000)).toFixed(2)} MB`;
+        else
+            return `${(size / (1_000_000_000)).toFixed(2)} GB`;
+    }
+
+    function humanElapsed(seconds: number): string {
+        if (!isFinite(seconds))
+            return '';
+        let minutes: number = Math.floor(seconds / 60);
+        seconds = Math.round(seconds % 60);
+        let hours = Math.floor(minutes / 60);
+        minutes = minutes % 60;
+        return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+
     function beforeUnload() {
     }
 </script>
 
-<nav class="bg-gray-800 py-2 px-3 mb-4">
-    <form action="." method="GET">
+<nav class="bg-gray-800 py-2 mb-4 flex">
+    <a class="items-center justify-center inline-flex py-1.5 px-5 text-white" href="/">Home</a>
+    <form action="." method="GET" class="inline">
         <input name="q" type="search" class="rounded-full py-1.5 px-3" bind:value={queryTerm} placeholder="search">
     </form>
+
+    {#if movieTitle}
+    <div class="items-center justify-center inline-flex py-1.5 ml-10 text-white italic">{ movieTitle }</div>
+    {/if}
 </nav>
 
-<ul class="grid grid-cols-6 gap-x-4 gap-y-8 mx-5">
+<ul class="grid grid-cols-6 gap-x-4 gap-y-8 mx-3 text-sm">
     {#each movies as movie}
-        <li class="">
-            <a href={`?m=${movie.torrents[0].hash}&n=${encodeURIComponent(movie.title)}`}>
+        <li title={movie.synopsis}>
+            <a class="block h-full p-2 hover:bg-gray-200" href={`?m=${movie.torrents[0].hash}&n=${encodeURIComponent(movie.title)}`}>
                 <img src={movie.medium_cover_image} alt="cover">
-                <p class="text-sm">{ movie.title_long }</p>
-                <p class="text-xs">{ movie.synopsis }</p>
+                <p class="overflow-hidden whitespace-nowrap text-ellipsis">{ movie.title }</p>
+                <p class="text-sm">{ movie.year }</p>
             </a>
         </li>
     {/each}
@@ -142,4 +198,33 @@
     </div>
 {/if}
 
+{#if torrentInfo}
+    <div class="grid grid-cols-[10rem,auto] gap-x-4 gap-y-1 mx-5 mt-5 font-mono text-sm">
+        <div>Download Speed</div>
+        <div>{ humanFileSize(torrentInfo.downloadSpeed) }/s</div>
+        <div>Upload Speed</div>
+        <div>{ humanFileSize(torrentInfo.uploadSpeed) }/s</div>
+        <div>Progress</div>
+        <div>{ (torrentInfo.progress * 100).toFixed(1) }%</div>
+        <div>Num Peers</div>
+        <div>{ torrentInfo.numPeers }</div>
+        <div>Downloaded</div>
+        <div>{ humanFileSize(torrentInfo.downloaded) }</div>
+        <div>Total Size</div>
+        <div>{ humanFileSize(torrentInfo.length) }</div>
+        <div>ETA</div>
+        <div>{ humanElapsed(((torrentInfo.length - torrentInfo.downloaded) / torrentInfo.downloadSpeed)) }</div>
+    </div>
+{/if}
+
+<div class="h-32"></div>
+
 <svelte:window on:beforeunload={beforeUnload} />
+
+<svelte:head>
+    {#if movieTitle}
+        <title>{ movieTitle }</title>
+    {:else}
+        <title>SilverScreen</title>
+    {/if}
+</svelte:head>
