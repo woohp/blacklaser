@@ -62,6 +62,8 @@
     let videoContainerEl: HTMLDivElement;
 
     onMount(async () => {
+        console.debug(await getIpAndGeoInfo());
+
         const WebTorrent = await import('webtorrent');
         const client: WebTorrent.Instance = new (WebTorrent as any)();
 
@@ -111,13 +113,13 @@
         }
 
         queryTerm = urlParams.get("q") || '';
-        const response = await fetch(queryTerm === '' ? 'https://yts.mx/api/v2/list_movies.json?' : `https://yts.mx/api/v2/list_movies.jsonp?query_term=${queryTerm}&quality=720p&sort_by=year`);
+        const response = await fetch(queryTerm === '' ? 'https://yts.mx/api/v2/list_movies.json?' : `https://yts.mx/api/v2/list_movies.jsonp?query_term=${queryTerm}&quality=1080p&sort_by=year`);
         const responseBody = await response.json() as {data: {movies: Movie[]}};
         let dedupHistory: Set<number> = new Set();
         for (let movie of responseBody.data.movies) {
             if (dedupHistory.has(movie.id))
                 continue;
-            movie.torrents = movie.torrents.filter(torrent => torrent.quality == '720p');
+            movie.torrents = movie.torrents.filter(torrent => torrent.quality == '1080p');
             movie.torrents.sort((a, b) => a.type === b.type ? 0 : (a.type === 'bluray' ? -1 : 1));
             movies.push(movie);
             dedupHistory.add(movie.id);
@@ -143,6 +145,67 @@
         }
     }
 
+    async function getIpAndGeoInfo() {
+        const [ip, dbWorker] = await Promise.all([
+            getExternalIp(),
+            loadGeoIpDb(),
+        ]);
+
+        // convert ipv4 format to integer representation
+        const ipv4 = ip.split('.').map(i => parseInt(i));
+        const ipInteger = (ipv4[0] << 24) + (ipv4[1] << 16) + (ipv4[2] << 8) + ipv4[3] - 0x8000_0000;
+
+        const rows: Record<string, any>[] = await dbWorker.db.query(`
+select latitude, longitude, locations.*
+from networks_idx
+join networks on networks_idx.id = networks.rowid
+join locations on networks.geoname_id = locations.geoname_id
+where ${ipInteger} between networks_idx.first_address and networks_idx.last_address`) as Record<string, any>[];
+        console.debug(rows);
+        if (rows.length === 0) {
+            alert('failed to check vpn, be careful...');
+            return {};
+        }
+
+        const latitude = rows[0].latitude / 1e5;
+        const longitude = rows[0].longitude / 1e5;
+        return {...rows[0], ip, latitude, longitude};
+    }
+
+    async function getExternalIp(): Promise<string> {
+        const { ip } = await (await fetch('https://www.myexternalip.com/json')).json();
+        return ip;
+    }
+
+    async function loadGeoIpDb() {
+        const { createDbWorker } = await import("sql.js-httpvfs");
+        const workerUrl = new URL(
+            "sql.js-httpvfs/dist/sqlite.worker.js",
+            import.meta.url,
+        );
+        const wasmUrl = new URL(
+            "sql.js-httpvfs/dist/sql-wasm.wasm",
+            import.meta.url,
+        );
+        const config = {
+            from: "inline",
+            config: {
+                serverMode: "chunked", // file is just a plain old full sqlite database
+                urlPrefix: "geoip/db.sqlite3.",
+                serverChunkSize: 46137344,
+                requestChunkSize: 1024, // the page size of the  sqlite database (by default 4096)
+                databaseLengthBytes: 407158784,
+            }
+        };
+        const worker = await createDbWorker(
+            [config],
+            workerUrl.toString(),
+            wasmUrl.toString(),
+            // maxBytesToRead // optional, defaults to Infinity
+        );
+        return worker;
+    }
+
     function humanFileSize(size: number): string {
         if (size < 1_000)
             return `${size.toFixed(2)} B`;
@@ -154,9 +217,9 @@
             return `${(size / (1_000_000_000)).toFixed(2)} GB`;
     }
 
-    function humanElapsed(seconds: number): string {
+    function humanElapsed(seconds: number): string|null {
         if (!isFinite(seconds))
-            return '';
+            return null;
         let minutes: number = Math.floor(seconds / 60);
         seconds = Math.round(seconds % 60);
         let hours = Math.floor(minutes / 60);
@@ -168,18 +231,15 @@
     }
 </script>
 
-<nav class="bg-gray-800 py-2 mb-4 flex">
-    <a class="items-center justify-center inline-flex py-1.5 px-5 text-white" href="/">Home</a>
-    <form action="." method="GET" class="inline">
-        <input name="q" type="search" class="rounded-full py-1.5 px-3" bind:value={queryTerm} placeholder="search">
+<nav class="bg-gray-800 py-2 px-5 mb-4 flex">
+    <a class="hidden sm:block items-center justify-center inline-flex py-1.5 px-5 -ml-5 text-white" href="/">Home</a>
+    <form action="." method="GET" class="w-full">
+        <input name="q" type="search" class="rounded-full py-1.5 px-3 w-full" bind:value={queryTerm} placeholder="search">
     </form>
 
-    {#if movieTitle}
-    <div class="items-center justify-center inline-flex py-1.5 ml-10 text-white italic">{ movieTitle }</div>
-    {/if}
 </nav>
 
-<ul class="grid grid-cols-6 gap-x-4 gap-y-8 mx-3 text-sm">
+<ul class="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-8 mx-3 text-sm">
     {#each movies as movie}
         <li title={movie.synopsis}>
             <a class="block h-full p-2 hover:bg-gray-200" href={`?m=${movie.torrents[0].hash}&n=${encodeURIComponent(movie.title)}`}>
@@ -199,8 +259,12 @@
     </div>
 {/if}
 
+{#if movieTitle}
+    <h1 class="items-center justify-center inline-flex py-1.5 mx-5 my-5 font-semibold">{ movieTitle }</h1>
+{/if}
+
 {#if torrentInfo}
-    <div class="grid grid-cols-[10rem,auto] gap-x-4 gap-y-1 mx-5 mt-5 font-mono text-sm">
+    <div class="grid grid-cols-[10rem,auto] gap-x-4 gap-y-1 mx-5 font-mono text-sm">
         <div>Download Speed</div>
         <div>{ humanFileSize(torrentInfo.downloadSpeed) }/s</div>
         <div>Upload Speed</div>
@@ -214,7 +278,7 @@
         <div>Total Size</div>
         <div>{ humanFileSize(torrentInfo.length) }</div>
         <div>ETA</div>
-        <div>{ humanElapsed(((torrentInfo.length - torrentInfo.downloaded) / torrentInfo.downloadSpeed)) }</div>
+        <div>{ humanElapsed(((torrentInfo.length - torrentInfo.downloaded) / torrentInfo.downloadSpeed)) || '<TBD>' }</div>
     </div>
 {/if}
 
