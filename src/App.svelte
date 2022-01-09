@@ -62,7 +62,7 @@
     let videoContainerEl: HTMLDivElement;
 
     onMount(async () => {
-        console.debug(await getIpAndGeoInfo());
+        // console.debug(await getIpAndGeoInfo());
 
         const WebTorrent = await import('webtorrent');
         const client: WebTorrent.Instance = new (WebTorrent as any)();
@@ -145,66 +145,66 @@
         }
     }
 
-    async function getIpAndGeoInfo() {
-        const [ip, dbWorker] = await Promise.all([
-            getExternalIp(),
-            loadGeoIpDb(),
-        ]);
-
-        // convert ipv4 format to integer representation
-        const ipv4 = ip.split('.').map(i => parseInt(i));
-        const ipInteger = (ipv4[0] << 24) + (ipv4[1] << 16) + (ipv4[2] << 8) + ipv4[3] - 0x8000_0000;
-
-        const rows: Record<string, any>[] = await dbWorker.db.query(`
-select latitude, longitude, locations.*
-from networks_idx
-join networks on networks_idx.id = networks.rowid
-join locations on networks.geoname_id = locations.geoname_id
-where ${ipInteger} between networks_idx.first_address and networks_idx.last_address`) as Record<string, any>[];
-        console.debug(rows);
-        if (rows.length === 0) {
-            alert('failed to check vpn, be careful...');
-            return {};
-        }
-
-        const latitude = rows[0].latitude / 1e5;
-        const longitude = rows[0].longitude / 1e5;
-        return {...rows[0], ip, latitude, longitude};
-    }
-
-    async function getExternalIp(): Promise<string> {
-        const { ip } = await (await fetch('https://www.myexternalip.com/json')).json();
-        return ip;
-    }
-
-    async function loadGeoIpDb() {
-        const { createDbWorker } = await import("sql.js-httpvfs");
-        const workerUrl = new URL(
-            "sql.js-httpvfs/dist/sqlite.worker.js",
-            import.meta.url,
-        );
-        const wasmUrl = new URL(
-            "sql.js-httpvfs/dist/sql-wasm.wasm",
-            import.meta.url,
-        );
-        const config = {
-            from: "inline",
-            config: {
-                serverMode: "chunked", // file is just a plain old full sqlite database
-                urlPrefix: "geoip/db.sqlite3.",
-                serverChunkSize: 46137344,
-                requestChunkSize: 1024, // the page size of the  sqlite database (by default 4096)
-                databaseLengthBytes: 407158784,
-            }
-        };
-        const worker = await createDbWorker(
-            [config],
-            workerUrl.toString(),
-            wasmUrl.toString(),
-            // maxBytesToRead // optional, defaults to Infinity
-        );
-        return worker;
-    }
+//     async function getIpAndGeoInfo() {
+//         const [ip, dbWorker] = await Promise.all([
+//             getExternalIp(),
+//             loadGeoIpDb(),
+//         ]);
+// 
+//         // convert ipv4 format to integer representation
+//         const ipv4 = ip.split('.').map(i => parseInt(i));
+//         const ipInteger = (ipv4[0] << 24) + (ipv4[1] << 16) + (ipv4[2] << 8) + ipv4[3] - 0x8000_0000;
+// 
+//         const rows: Record<string, any>[] = await dbWorker.db.query(`
+// select latitude, longitude, locations.*
+// from networks_idx
+// join networks on networks_idx.id = networks.rowid
+// join locations on networks.geoname_id = locations.geoname_id
+// where ${ipInteger} between networks_idx.first_address and networks_idx.last_address`) as Record<string, any>[];
+//         console.debug(rows);
+//         if (rows.length === 0) {
+//             alert('failed to check vpn, be careful...');
+//             return {};
+//         }
+// 
+//         const latitude = rows[0].latitude / 1e5;
+//         const longitude = rows[0].longitude / 1e5;
+//         return {...rows[0], ip, latitude, longitude};
+//     }
+// 
+//     async function getExternalIp(): Promise<string> {
+//         const { ip } = await (await fetch('https://www.myexternalip.com/json')).json();
+//         return ip;
+//     }
+// 
+//     async function loadGeoIpDb() {
+//         const { createDbWorker } = await import("sql.js-httpvfs");
+//         const workerUrl = new URL(
+//             "sql.js-httpvfs/dist/sqlite.worker.js",
+//             import.meta.url,
+//         );
+//         const wasmUrl = new URL(
+//             "sql.js-httpvfs/dist/sql-wasm.wasm",
+//             import.meta.url,
+//         );
+//         const config = {
+//             from: "inline",
+//             config: {
+//                 serverMode: "chunked", // file is just a plain old full sqlite database
+//                 urlPrefix: "geoip/db.sqlite3.",
+//                 serverChunkSize: 46137344,
+//                 requestChunkSize: 1024, // the page size of the  sqlite database (by default 4096)
+//                 databaseLengthBytes: 407158784,
+//             }
+//         };
+//         const worker = await createDbWorker(
+//             [config],
+//             workerUrl.toString(),
+//             wasmUrl.toString(),
+//             // maxBytesToRead // optional, defaults to Infinity
+//         );
+//         return worker;
+//     }
 
     function humanFileSize(size: number): string {
         if (size < 1_000)
