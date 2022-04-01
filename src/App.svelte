@@ -119,6 +119,8 @@
         for (let movie of responseBody.data.movies) {
             if (dedupHistory.has(movie.id))
                 continue;
+            if (movie.torrents.length === 0)
+                continue;
             movie.torrents = movie.torrents.filter(torrent => torrent.quality == '1080p');
             movie.torrents.sort((a, b) => a.type === b.type ? 0 : (a.type === 'bluray' ? -1 : 1));
             movies.push(movie);
