@@ -69,6 +69,16 @@
 
         const urlParams = new URLSearchParams(window.location.search);
 
+        queryTerm = urlParams.get("q") || '';
+
+        // we do have a full magnet link in the search? if so, just use it
+        const magnetMatch = /^magnet:\?xt=urn:btih:([0-9A-Fa-f]{40})(.*)/.exec(queryTerm);
+        if (magnetMatch) {
+            const infoHash = magnetMatch[1].toUpperCase();
+            const title = encodeURIComponent((new URLSearchParams(magnetMatch[2])).get('dn') || '');
+            location.replace(`/?m=${ infoHash }&n=${ title }`);
+        }
+
         movieInfoHash = urlParams.get("m");
         if (movieInfoHash) {
             loading = true;
@@ -112,7 +122,6 @@
             return;
         }
 
-        queryTerm = urlParams.get("q") || '';
         const response = await fetch(queryTerm === '' ? 'https://yts.mx/api/v2/list_movies.json?' : `https://yts.mx/api/v2/list_movies.jsonp?query_term=${queryTerm}&quality=1080p&sort_by=year`);
         const responseBody = await response.json() as {data: {movies: Movie[]}};
         let dedupHistory: Set<number> = new Set();
@@ -139,11 +148,7 @@
             clearTimeout(timeoutId);
             return Buffer.from(await torrentResponse.arrayBuffer());
         } catch (error) {
-            // if it failed to download the .torrent file, then use magnet link instead
-            if (error instanceof DOMException && error.name === 'AbortError')
-                return `magnet:?xt=urn:btih:${movieInfoHash}`;
-            else
-                throw error;
+            return `magnet:?xt=urn:btih:${movieInfoHash}`;
         }
     }
 
