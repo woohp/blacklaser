@@ -64,7 +64,7 @@
     onMount(async () => {
         // console.debug(await getIpAndGeoInfo());
 
-        const WebTorrent = await import('webtorrent');
+        const WebTorrent = (await import('webtorrent')).default;
         const client: WebTorrent.Instance = new (WebTorrent as any)();
 
         const urlParams = new URLSearchParams(window.location.search);
@@ -148,7 +148,7 @@
             clearTimeout(timeoutId);
             return Buffer.from(await torrentResponse.arrayBuffer());
         } catch (error) {
-            return `magnet:?xt=urn:btih:${movieInfoHash}`;
+            return `magnet:?xt=urn:btih:${infoHash}`;
         }
     }
 
