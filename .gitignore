@@ -26,3 +26,5 @@ node_modules
 .parcel-cache
 
 /*.sqlite
+
+src/sw.min.js

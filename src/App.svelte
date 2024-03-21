@@ -1,167 +1,200 @@
 <script lang="ts">
-    import { Buffer } from 'buffer';
-    import { onMount } from 'svelte';
-    import type * as WebTorrent from 'webtorrent';
+import { Buffer } from "node:buffer";
+import { onMount } from "svelte";
+import * as WebTorrent from "webtorrent";
 
-    interface Movie {
-        background_image: string;
-        background_image_original: string;
-        date_uploaded: string;
-        date_uploaded_unix: number;
-        description_full: string;
-        genres: string[];
-        id: number;
-        imdb_code: string;
-        language: string;
-        large_cover_image: string;
-        medium_cover_image: string;
-        mpa_rating: string;
-        rating: number;
-        runtime: number;
-        slug: string;
-        small_cover_image: string;
-        state: string;
-        summary: string;
-        synopsis: string;
-        title: string;
-        title_english: string;
-        title_long: string;
-        torrents: Torrent[];
-        url: string;
-        year: number;
-        yt_trailer_code: string;
+interface Movie {
+    background_image: string;
+    background_image_original: string;
+    date_uploaded: string;
+    date_uploaded_unix: number;
+    description_full: string;
+    genres: string[];
+    id: number;
+    imdb_code: string;
+    language: string;
+    large_cover_image: string;
+    medium_cover_image: string;
+    mpa_rating: string;
+    rating: number;
+    runtime: number;
+    slug: string;
+    small_cover_image: string;
+    state: string;
+    summary: string;
+    synopsis: string;
+    title: string;
+    title_english: string;
+    title_long: string;
+    torrents: Torrent[];
+    url: string;
+    year: number;
+    yt_trailer_code: string;
+}
+
+interface Torrent {
+    date_uploaded: string;
+    date_uploaded_unix: number;
+    hash: string;
+    peers: number;
+    quality: "720p" | "1080p" | "2160p";
+    seeds: number;
+    size: string;
+    size_bytes: number;
+    type: "bluray" | "web";
+    url: string;
+}
+
+let queryTerm: string = "";
+let movies: Movie[] = [];
+let movieInfoHash: string | null = null;
+let movieTitle: string | null = null;
+let loading: boolean = false;
+let torrentInfo: {
+    numPeers: number;
+    progress: number;
+    downloadSpeed: number;
+    uploadSpeed: number;
+    downloaded: number;
+    length: number;
+} | null = null;
+
+let videoEl: HTMLVideoElement;
+
+onMount(async () => {
+    // console.debug(await getIpAndGeoInfo());
+
+    const WebTorrent = (await import("webtorrent")).default;
+    const client: WebTorrent.Instance = new (WebTorrent as any)();
+
+    const reg = await navigator.serviceWorker.register(new URL("./sw.min.js", import.meta.url), { scope: "./" });
+    const worker = reg.active || reg.waiting || reg.installing;
+    function checkState(worker) {
+        return worker.state === "activated" && client.createServer({ controller: reg });
+    }
+    if (!checkState(worker)) {
+        worker!.addEventListener("statechange", ({ target }) => checkState(target));
     }
 
-    interface Torrent {
-        date_uploaded: string;
-        date_uploaded_unix: number;
-        hash: string;
-        peers: number;
-        quality: "720p"|"1080p"|"2160p";
-        seeds: number;
-        size: string;
-        size_bytes: number;
-        type: "bluray"|"web";
-        url: string;
-    }
+    const urlParams = new URLSearchParams(window.location.search);
 
-    let queryTerm: string = '';
-    let movies: Movie[] = [];
-    let movieInfoHash: string|null = null;
-    let movieTitle: string|null = null;
-    let loading: boolean = false;
-    let torrentInfo: {
-        numPeers: number,
-        progress: number,
-        downloadSpeed: number,
-        uploadSpeed: number,
-        downloaded: number,
-        length: number,
-    }|null = null;
+    queryTerm = urlParams.get("q") || "";
 
-    let videoContainerEl: HTMLDivElement;
+    // we do have a full magnet link in the search? if so, just use it
+    if (queryTerm.startsWith("magnet:?")) {
+        let infoHash: string | null = null;
+        let torrentFilePath: string | null = "";
+        let movieTitle: string = "";
 
-    onMount(async () => {
-        // console.debug(await getIpAndGeoInfo());
-
-        const WebTorrent = (await import('webtorrent')).default;
-        const client: WebTorrent.Instance = new (WebTorrent as any)();
-
-        const urlParams = new URLSearchParams(window.location.search);
-
-        queryTerm = urlParams.get("q") || '';
-
-        // we do have a full magnet link in the search? if so, just use it
-        const magnetMatch = /^magnet:\?xt=urn:btih:([0-9A-Fa-f]{40})(.*)/.exec(queryTerm);
-        if (magnetMatch) {
-            const infoHash = magnetMatch[1].toUpperCase();
-            const title = encodeURIComponent((new URLSearchParams(magnetMatch[2])).get('dn') || '');
-            location.replace(`/?m=${ infoHash }&n=${ title }`);
+        const searchParams = new URL(queryTerm).searchParams;
+        for (const [key, value] of searchParams) {
+            if (key === "xt" && value.startsWith("urn:btih:")) {
+                infoHash = value.slice(9).toUpperCase();
+            } else if (key === "xs" && value.endsWith(".torrent")) {
+                torrentFilePath = value;
+            } else if (key === "dn") {
+                movieTitle = value;
+            }
         }
 
-        movieInfoHash = urlParams.get("m");
-        if (movieInfoHash) {
-            loading = true;
-            movieTitle = urlParams.get("n") || '';
-
-            const opts = {
-                announce: [
-                    'wss://tracker.btorrent.xyz',
-                    'wss://tracker.fastcast.nz',
-                    'wss://tracker.openwebtorrent.com',
-                ],
-            };
-
-            client.add(await getTorrent(movieInfoHash), opts, (torrent: WebTorrent.Torrent) => {
-                // Got torrent metadata!
-                console.info('Client is downloading:', torrent.infoHash);
-
-                torrent.files.sort((a, b) => b.length - a.length);
-                for (const file of torrent.files) {
-                    if (file.name.endsWith('.mp4')) {
-                        // Display the file by appending it to the DOM. Supports video, audio, images, and
-                        // more. Specify a container element (CSS selector or reference to DOM node).
-                        file.appendTo(videoContainerEl);
-                        loading = false;
-                        break;
-                    }
-                }
-
-                setInterval(() => {
-                    torrentInfo = {
-                        downloadSpeed: torrent.downloadSpeed,
-                        uploadSpeed: torrent.uploadSpeed,
-                        progress: torrent.progress,
-                        numPeers: torrent.numPeers,
-                        downloaded: torrent.downloaded,
-                        length: torrent.length,
-                    };
-                }, 1000);
-            });
-
+        if (infoHash) {
+            location.replace(`/?m=${infoHash}&n=${movieTitle}&t=${torrentFilePath}`);
             return;
         }
+    }
 
-        const response = await fetch(queryTerm === '' ? 'https://yts.mx/api/v2/list_movies.json?' : `https://yts.mx/api/v2/list_movies.jsonp?query_term=${queryTerm}&quality=1080p&sort_by=year`);
-        const responseBody = await response.json() as {data: {movies: Movie[]}};
-        let dedupHistory: Set<number> = new Set();
-        for (let movie of responseBody.data.movies) {
-            if (dedupHistory.has(movie.id))
-                continue;
-            if (movie.torrents.length === 0)
-                continue;
-            movie.torrents = movie.torrents.filter(torrent => torrent.quality == '1080p');
-            movie.torrents.sort((a, b) => a.type === b.type ? 0 : (a.type === 'bluray' ? -1 : 1));
-            movies.push(movie);
-            dedupHistory.add(movie.id);
-        }
-        movies = movies;
-        console.debug(movies);
-    });
+    movieInfoHash = urlParams.get("m");
+    const torrentFileUrl = urlParams.get("t");
+    if (movieInfoHash) {
+        loading = true;
+        movieTitle = urlParams.get("n") || "";
 
-    async function getTorrent(infoHash: string): Promise<string|Buffer> {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20_000);  // timeout in 20 seconds
+        const opts = {
+            announce: ["wss://tracker.btorrent.xyz", "wss://tracker.fastcast.nz", "wss://tracker.openwebtorrent.com"],
+        };
 
+        client.add(await getTorrent(movieInfoHash, torrentFileUrl), opts, (torrent: WebTorrent.Torrent) => {
+            // Got torrent metadata!
+            console.info("Client is downloading:", torrent.infoHash);
+
+            torrent.files.sort((a, b) => b.length - a.length);
+            for (const file of torrent.files) {
+                if (file.name.endsWith(".mp4")) {
+                    // Display the file by appending it to the DOM. Supports video, audio, images, and
+                    // more. Specify a container element (CSS selector or reference to DOM node).
+                    file.streamTo(videoEl);
+                    loading = false;
+                    break;
+                }
+            }
+
+            setInterval(() => {
+                torrentInfo = {
+                    downloadSpeed: torrent.downloadSpeed,
+                    uploadSpeed: torrent.uploadSpeed,
+                    progress: torrent.progress,
+                    numPeers: torrent.numPeers,
+                    downloaded: torrent.downloaded,
+                    length: torrent.length,
+                };
+            }, 1000);
+        });
+
+        return;
+    }
+
+    const response = await fetch(
+        queryTerm === ""
+            ? "https://yts.mx/api/v2/list_movies.json?"
+            : `https://yts.mx/api/v2/list_movies.jsonp?query_term=${queryTerm}&quality=1080p&sort_by=year`,
+    );
+    const responseBody = (await response.json()) as { data: { movies: Movie[] } };
+    let dedupHistory: Set<number> = new Set();
+    for (let movie of responseBody.data.movies) {
+        if (dedupHistory.has(movie.id)) continue;
+        if (movie.torrents.length === 0) continue;
+        movie.torrents = movie.torrents.filter((torrent) => torrent.quality === "1080p");
+        movie.torrents.sort((a, b) => (a.type === b.type ? 0 : a.type === "bluray" ? -1 : 1));
+        movies.push(movie);
+        dedupHistory.add(movie.id);
+    }
+    movies = movies;
+    console.debug(movies);
+});
+
+async function getTorrent(infoHash: string, torrentFilePath: string | null): Promise<string | Buffer> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20_000); // timeout in 20 seconds
+
+    if (torrentFilePath) {
         try {
-            const torrentResponse = await fetch(`https://yts.mx/torrent/download/${infoHash}`, {signal: controller.signal});
+            const torrentResponse = await fetch(torrentFilePath, { signal: controller.signal });
             clearTimeout(timeoutId);
             return Buffer.from(await torrentResponse.arrayBuffer());
-        } catch (error) {
-            return `magnet:?xt=urn:btih:${infoHash}`;
-        }
+        } catch (error) {}
     }
+
+    try {
+        const torrentResponse = await fetch(`https://yts.mx/torrent/download/${infoHash}`, {
+            signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        return Buffer.from(await torrentResponse.arrayBuffer());
+    } catch (error) {
+        return `magnet:?xt=urn:btih:${infoHash}`;
+    }
+}
 
 //     async function getIpAndGeoInfo() {
 //         const [ip, dbWorker] = await Promise.all([
 //             getExternalIp(),
 //             loadGeoIpDb(),
 //         ]);
-// 
+//
 //         // convert ipv4 format to integer representation
 //         const ipv4 = ip.split('.').map(i => parseInt(i));
 //         const ipInteger = (ipv4[0] << 24) + (ipv4[1] << 16) + (ipv4[2] << 8) + ipv4[3] - 0x8000_0000;
-// 
+//
 //         const rows: Record<string, any>[] = await dbWorker.db.query(`
 // select latitude, longitude, locations.*
 // from networks_idx
@@ -173,17 +206,17 @@
 //             alert('failed to check vpn, be careful...');
 //             return {};
 //         }
-// 
+//
 //         const latitude = rows[0].latitude / 1e5;
 //         const longitude = rows[0].longitude / 1e5;
 //         return {...rows[0], ip, latitude, longitude};
 //     }
-// 
+//
 //     async function getExternalIp(): Promise<string> {
 //         const { ip } = await (await fetch('https://www.myexternalip.com/json')).json();
 //         return ip;
 //     }
-// 
+//
 //     async function loadGeoIpDb() {
 //         const { createDbWorker } = await import("sql.js-httpvfs");
 //         const workerUrl = new URL(
@@ -213,29 +246,31 @@
 //         return worker;
 //     }
 
-    function humanFileSize(size: number): string {
-        if (size < 1_000)
-            return `${size.toFixed(2)} B`;
-        else if (size < 1_000_000)
-            return `${(size / 1_000).toFixed(2)} KB`;
-        else if (size < 1_000_000_000)
-            return `${(size / (1_000_000)).toFixed(2)} MB`;
-        else
-            return `${(size / (1_000_000_000)).toFixed(2)} GB`;
+function humanFileSize(size: number): string {
+    if (size < 1_000) {
+        return `${size.toFixed(2)} B`;
+    } else if (size < 1_000_000) {
+        return `${(size / 1_000).toFixed(2)} KB`;
+    } else if (size < 1_000_000_000) {
+        return `${(size / 1_000_000).toFixed(2)} MB`;
     }
+    return `${(size / 1_000_000_000).toFixed(2)} GB`;
+}
 
-    function humanElapsed(seconds: number): string|null {
-        if (!isFinite(seconds))
-            return null;
-        let minutes: number = Math.floor(seconds / 60);
-        seconds = Math.round(seconds % 60);
-        let hours = Math.floor(minutes / 60);
-        minutes = minutes % 60;
-        return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+function humanElapsed(seconds: number): string | null {
+    if (!isFinite(seconds)) {
+        return null;
     }
+    let minutes: number = Math.floor(seconds / 60);
+    seconds = Math.round(seconds % 60);
+    let hours = Math.floor(minutes / 60);
+    minutes = minutes % 60;
+    return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds
+        .toString()
+        .padStart(2, "0")}`;
+}
 
-    function beforeUnload() {
-    }
+function beforeUnload() {}
 </script>
 
 <nav class="bg-gray-800 py-2 px-5 mb-4 flex">
@@ -259,10 +294,11 @@
 </ul>
 
 {#if movieInfoHash}
-    <div bind:this={videoContainerEl} class="grid justify-center">
-    {#if loading}
-        <div class="text-center">loading...</div>
-    {/if}
+    <div class="grid justify-center">
+        <video bind:this={videoEl} src="" controls></video>
+        {#if loading}
+            <div class="text-center">loading...</div>
+        {/if}
     </div>
 {/if}
 
