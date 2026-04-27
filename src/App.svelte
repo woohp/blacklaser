@@ -1,68 +1,15 @@
 <script lang="ts">
     import { onDestroy, onMount } from "svelte";
+    import { humanElapsed, humanFileSize } from "./format";
+    import { getTorrent, searchMovies, type Movie } from "./yts";
+    import {
+        createWebTorrentClient,
+        getTorrentInfo,
+        type TorrentInfo,
+        type WebTorrentClient,
+        type WebTorrentTorrent,
+    } from "./webtorrent";
 
-    interface Movie {
-        id: number;
-        title: string;
-        title_long: string;
-        synopsis: string;
-        summary: string;
-        year: number;
-        rating: number;
-        runtime: number;
-        genres: string[];
-        medium_cover_image: string;
-        large_cover_image: string;
-        torrents: MovieTorrent[];
-    }
-
-    interface MovieTorrent {
-        hash: string;
-        peers: number;
-        quality: "720p" | "1080p" | "2160p";
-        seeds: number;
-        size: string;
-        size_bytes: number;
-        type: "bluray" | "web";
-        url: string;
-    }
-
-    interface TorrentInfo {
-        numPeers: number;
-        progress: number;
-        downloadSpeed: number;
-        uploadSpeed: number;
-        downloaded: number;
-        length: number;
-    }
-
-    interface WebTorrentFile {
-        name: string;
-        length: number;
-        streamTo: (element: HTMLVideoElement) => void;
-    }
-
-    interface WebTorrentTorrent {
-        files: WebTorrentFile[];
-        numPeers: number;
-        progress: number;
-        downloadSpeed: number;
-        uploadSpeed: number;
-        downloaded: number;
-        length: number;
-    }
-
-    interface WebTorrentClient {
-        add: (
-            torrentId: string | Uint8Array,
-            options: { announce: string[] },
-            onTorrent: (torrent: WebTorrentTorrent) => void,
-        ) => void;
-        createServer: (options: { controller: ServiceWorkerRegistration }) => unknown;
-        destroy: () => void;
-    }
-
-    const ytsBaseUrl = "https://yts.bz";
     const announce = ["wss://tracker.btorrent.xyz", "wss://tracker.fastcast.nz", "wss://tracker.openwebtorrent.com"];
 
     let queryTerm = $state("");
@@ -105,7 +52,7 @@
             return;
         }
 
-        await searchMovies(queryTerm);
+        await loadMovies(queryTerm);
     }
 
     function redirectMagnetSearch(magnet: string) {
@@ -129,25 +76,12 @@
         location.replace(`${location.pathname}?${params.toString()}`);
     }
 
-    async function searchMovies(searchTerm: string) {
+    async function loadMovies(searchTerm: string) {
         loading = true;
         errorMessage = null;
 
         try {
-            const params = new URLSearchParams();
-            params.set("quality", "1080p");
-            params.set("sort_by", "year");
-            if (searchTerm) {
-                params.set("query_term", searchTerm);
-            }
-
-            const response = await fetch(`${ytsBaseUrl}/api/v2/list_movies.json?${params.toString()}`);
-            if (!response.ok) {
-                throw new Error(`YTS returned HTTP ${response.status}`);
-            }
-
-            const responseBody = (await response.json()) as { data?: { movies?: Movie[] } };
-            movies = dedupeMovies(responseBody.data?.movies ?? []);
+            movies = await searchMovies(searchTerm);
         } catch (error) {
             errorMessage = error instanceof Error ? error.message : "Movie search failed.";
             movies = [];
@@ -156,37 +90,13 @@
         }
     }
 
-    function dedupeMovies(searchResults: Movie[]) {
-        const seen = new Set<number>();
-        const deduped: Movie[] = [];
-
-        for (const movie of searchResults) {
-            if (seen.has(movie.id)) {
-                continue;
-            }
-
-            const torrents = movie.torrents
-                .filter((torrent) => torrent.quality === "1080p")
-                .sort((a, b) => (a.type === b.type ? 0 : a.type === "bluray" ? -1 : 1));
-
-            if (torrents.length === 0) {
-                continue;
-            }
-
-            deduped.push({ ...movie, torrents });
-            seen.add(movie.id);
-        }
-
-        return deduped;
-    }
-
     async function playMovie(infoHash: string, magnet: string | null) {
         loading = true;
         errorMessage = null;
 
         try {
-            const WebTorrent = await loadWebTorrent();
-            const webTorrentClient = new WebTorrent();
+            const webTorrentClient = createWebTorrentClient();
+            webTorrentClient.on("error", setTorrentError);
             client = webTorrentClient;
             await createWebTorrentServer();
 
@@ -195,25 +105,6 @@
             loading = false;
             errorMessage = error instanceof Error ? error.message : "Could not start WebTorrent.";
         }
-    }
-
-    async function loadWebTorrent() {
-        const webTorrentUrl = `${import.meta.env.BASE_URL}webtorrent.min.js`;
-
-        const response = await fetch(webTorrentUrl);
-        if (!response.ok) {
-            throw new Error(`Could not load WebTorrent browser bundle: HTTP ${response.status}`);
-        }
-
-        const moduleBlob = new Blob([await response.text()], { type: "text/javascript" });
-        const moduleUrl = URL.createObjectURL(moduleBlob);
-
-        const webTorrentModule = (await import(/* @vite-ignore */ moduleUrl)) as {
-            default: new () => WebTorrentClient;
-        };
-        URL.revokeObjectURL(moduleUrl);
-
-        return webTorrentModule.default;
     }
 
     async function createWebTorrentServer() {
@@ -245,26 +136,9 @@
         });
     }
 
-    async function getTorrent(infoHash: string): Promise<string | Uint8Array> {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20_000);
-
-        try {
-            const torrentResponse = await fetch(`${ytsBaseUrl}/torrent/download/${infoHash}`, {
-                signal: controller.signal,
-            });
-            if (!torrentResponse.ok) {
-                throw new Error(`Torrent download returned HTTP ${torrentResponse.status}`);
-            }
-            return new Uint8Array(await torrentResponse.arrayBuffer());
-        } catch {
-            return `magnet:?xt=urn:btih:${infoHash}`;
-        } finally {
-            clearTimeout(timeoutId);
-        }
-    }
-
     function streamTorrent(torrent: WebTorrentTorrent) {
+        torrent.on("error", setTorrentError);
+
         const file = [...torrent.files]
             .sort((a, b) => b.length - a.length)
             .find((torrentFile) => /\.(mp4|m4v|webm|mkv)$/i.test(torrentFile.name));
@@ -288,14 +162,12 @@
     }
 
     function updateTorrentInfo(torrent: WebTorrentTorrent) {
-        torrentInfo = {
-            downloadSpeed: torrent.downloadSpeed,
-            uploadSpeed: torrent.uploadSpeed,
-            progress: torrent.progress,
-            numPeers: torrent.numPeers,
-            downloaded: torrent.downloaded,
-            length: torrent.length,
-        };
+        torrentInfo = getTorrentInfo(torrent);
+    }
+
+    function setTorrentError(error: Error) {
+        loading = false;
+        errorMessage = error.message;
     }
 
     function movieUrl(movie: Movie) {
@@ -304,34 +176,6 @@
             n: movie.title,
         });
         return `${location.pathname}?${params.toString()}`;
-    }
-
-    function humanFileSize(size: number): string {
-        if (size < 1_000) {
-            return `${size.toFixed(2)} B`;
-        }
-        if (size < 1_000_000) {
-            return `${(size / 1_000).toFixed(2)} KB`;
-        }
-        if (size < 1_000_000_000) {
-            return `${(size / 1_000_000).toFixed(2)} MB`;
-        }
-        return `${(size / 1_000_000_000).toFixed(2)} GB`;
-    }
-
-    function humanElapsed(seconds: number): string | null {
-        if (!Number.isFinite(seconds)) {
-            return null;
-        }
-
-        let minutes = Math.floor(seconds / 60);
-        const roundedSeconds = Math.round(seconds % 60);
-        const hours = Math.floor(minutes / 60);
-        minutes %= 60;
-
-        return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${roundedSeconds
-            .toString()
-            .padStart(2, "0")}`;
     }
 </script>
 
