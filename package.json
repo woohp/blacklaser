@@ -2,54 +2,30 @@
   "name": "blacklaser",
   "version": "1.0.0",
   "description": "",
+  "type": "module",
   "dependencies": {
-    "sql.js-httpvfs": "github:woohp/sql.js-httpvfs#master",
-    "webtorrent": "^2.1.37"
+    "webtorrent": "^2.8.5"
   },
   "devDependencies": {
-    "@parcel/config-default": "^2.12.0",
-    "@parcel/core": "^2.12.0",
-    "@tailwindcss/forms": "^0.5.7",
-    "@tsconfig/svelte": "^5.0.2",
-    "@types/node": "^17.0.45",
-    "@types/webtorrent": "^0.109.8",
-    "autoprefixer": "^10.4.19",
-    "buffer": "^6.0.3",
-    "crypto-browserify": "^3.12.0",
-    "events": "^3.3.0",
-    "fsa-chunk-store": "^1.1.5",
-    "https-browserify": "^1.0.0",
-    "parcel": "^2.12.0",
-    "parcel-transformer-svelte3-plus": "^0.2.10",
-    "path-browserify": "^1.0.1",
-    "postcss": "^8.4.38",
-    "process": "^0.11.10",
-    "punycode": "^2.3.1",
-    "querystring-es3": "^0.2.1",
-    "stream-browserify": "^3.0.0",
-    "stream-http": "^3.2.0",
-    "string_decoder": "^1.3.0",
-    "svelte": "^4.2.12",
-    "svelte-preprocess": "^5.1.3",
-    "tailwindcss": "^3.1.1",
-    "typescript": "^5.4.3",
-    "url": "^0.11.3",
-    "util": "^0.12.5",
-    "vm-browserify": "^1.1.2"
+    "@biomejs/biome": "^2.4.13",
+    "@sveltejs/vite-plugin-svelte": "^7.0.0",
+    "@tsconfig/svelte": "^5.0.8",
+    "@types/bun": "^1.3.13",
+    "@types/node": "^25.6.0",
+    "svelte": "^5.55.5",
+    "svelte-check": "^4.4.6",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10"
   },
   "scripts": {
-    "preamble": "rm -rf $(find docs -type f | grep -v geoip) && cp node_modules/webtorrent/dist/sw.min.js src/",
-    "start": "NODE_ENV=development npm run preamble; parcel serve ./src/index.html --dist-dir docs",
-    "build": "NODE_ENV=production npm run preamble; parcel build ./src/index.html --no-scope-hoist --no-source-maps --dist-dir docs --public-url ./",
-    "lint": "biome check ./src svelte.config.js tailwind.config.js",
-    "format": "biome format ./src svelte.config.js tailwind.config.js --write"
+    "dev": "sh scripts/vendor-assets.sh && vite --host 0.0.0.0",
+    "build": "sh scripts/build-assets.sh && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.json",
+    "lint": "biome check src vite.config.ts",
+    "format": "biome format src vite.config.ts --write"
   },
   "author": "Hui Peng Hu",
   "license": "ISC",
-  "browserslist": [
-    "last 2 Chrome versions"
-  ],
-  "@parcel/resolver-default": {
-    "packageExports": true
-  }
+  "browserslist": ["last 2 Chrome versions"]
 }

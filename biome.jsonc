@@ -1,12 +1,12 @@
 {
   "files": {
-    "include": [
-      "src/index.ts", "src/App.svelte", "svelte.config.js", "tailwind.config.js",
+    "includes": [
+      "src/**/*.ts", "vite.config.ts",
     ],
   },
   "javascript": {
     "formatter": {
-      "trailingComma": "all",
+      "trailingCommas": "all",
       "indentWidth": 4,
       "indentStyle": "space",
       "lineWidth": 120,

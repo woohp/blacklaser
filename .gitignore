@@ -25,6 +25,11 @@ node_modules
 
 .parcel-cache
 
+# Vite/Bun
+dist
+bun.lockb
+
 /*.sqlite
 
 src/sw.min.js
+src/vendor/

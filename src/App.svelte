@@ -1,338 +1,584 @@
 <script lang="ts">
-import { Buffer } from "node:buffer";
-import { onMount } from "svelte";
-import * as WebTorrent from "webtorrent";
+    import { onDestroy, onMount } from "svelte";
 
-interface Movie {
-    background_image: string;
-    background_image_original: string;
-    date_uploaded: string;
-    date_uploaded_unix: number;
-    description_full: string;
-    genres: string[];
-    id: number;
-    imdb_code: string;
-    language: string;
-    large_cover_image: string;
-    medium_cover_image: string;
-    mpa_rating: string;
-    rating: number;
-    runtime: number;
-    slug: string;
-    small_cover_image: string;
-    state: string;
-    summary: string;
-    synopsis: string;
-    title: string;
-    title_english: string;
-    title_long: string;
-    torrents: Torrent[];
-    url: string;
-    year: number;
-    yt_trailer_code: string;
-}
-
-interface Torrent {
-    date_uploaded: string;
-    date_uploaded_unix: number;
-    hash: string;
-    peers: number;
-    quality: "720p" | "1080p" | "2160p";
-    seeds: number;
-    size: string;
-    size_bytes: number;
-    type: "bluray" | "web";
-    url: string;
-}
-
-let queryTerm: string = "";
-let movies: Movie[] = [];
-let movieInfoHash: string | null = null;
-let movieTitle: string | null = null;
-let loading: boolean = false;
-let torrentInfo: {
-    numPeers: number;
-    progress: number;
-    downloadSpeed: number;
-    uploadSpeed: number;
-    downloaded: number;
-    length: number;
-} | null = null;
-
-let videoEl: HTMLVideoElement;
-
-onMount(async () => {
-    // console.debug(await getIpAndGeoInfo());
-
-    const WebTorrent = (await import("webtorrent")).default;
-    const client: WebTorrent.Instance = new (WebTorrent as any)();
-
-    const reg = await navigator.serviceWorker.register(new URL("./sw.min.js", import.meta.url), { scope: "./" });
-    const worker = reg.active || reg.waiting || reg.installing;
-    function checkState(worker) {
-        return worker.state === "activated" && client.createServer({ controller: reg });
-    }
-    if (!checkState(worker)) {
-        worker!.addEventListener("statechange", ({ target }) => checkState(target));
+    interface Movie {
+        id: number;
+        title: string;
+        title_long: string;
+        synopsis: string;
+        summary: string;
+        year: number;
+        rating: number;
+        runtime: number;
+        genres: string[];
+        medium_cover_image: string;
+        large_cover_image: string;
+        torrents: MovieTorrent[];
     }
 
-    const urlParams = new URLSearchParams(window.location.search);
+    interface MovieTorrent {
+        hash: string;
+        peers: number;
+        quality: "720p" | "1080p" | "2160p";
+        seeds: number;
+        size: string;
+        size_bytes: number;
+        type: "bluray" | "web";
+        url: string;
+    }
 
-    queryTerm = urlParams.get("q") || "";
+    interface TorrentInfo {
+        numPeers: number;
+        progress: number;
+        downloadSpeed: number;
+        uploadSpeed: number;
+        downloaded: number;
+        length: number;
+    }
 
-    // we do have a full magnet link in the search? if so, just use it
-    if (queryTerm.startsWith("magnet:?")) {
-        let infoHash: string | null = null;
-        let torrentFilePath: string | null = "";
-        let movieTitle: string = "";
+    interface WebTorrentFile {
+        name: string;
+        length: number;
+        streamTo: (element: HTMLVideoElement) => void;
+    }
 
-        const searchParams = new URL(queryTerm).searchParams;
-        for (const [key, value] of searchParams) {
-            if (key === "xt" && value.startsWith("urn:btih:")) {
-                infoHash = value.slice(9).toUpperCase();
-            } else if (key === "xs" && value.endsWith(".torrent")) {
-                torrentFilePath = value;
-            } else if (key === "dn") {
-                movieTitle = value;
-            }
+    interface WebTorrentTorrent {
+        files: WebTorrentFile[];
+        numPeers: number;
+        progress: number;
+        downloadSpeed: number;
+        uploadSpeed: number;
+        downloaded: number;
+        length: number;
+    }
+
+    interface WebTorrentClient {
+        add: (
+            torrentId: string | Uint8Array,
+            options: { announce: string[] },
+            onTorrent: (torrent: WebTorrentTorrent) => void,
+        ) => void;
+        createServer: (options: { controller: ServiceWorkerRegistration }) => unknown;
+        destroy: () => void;
+    }
+
+    const ytsBaseUrl = "https://yts.bz";
+    const announce = ["wss://tracker.btorrent.xyz", "wss://tracker.fastcast.nz", "wss://tracker.openwebtorrent.com"];
+
+    let queryTerm = $state("");
+    let movies = $state<Movie[]>([]);
+    let movieInfoHash = $state<string | null>(null);
+    let movieTitle = $state<string | null>(null);
+    let loading = $state(false);
+    let errorMessage = $state<string | null>(null);
+    let torrentInfo = $state<TorrentInfo | null>(null);
+    let videoEl = $state<HTMLVideoElement>();
+
+    let client: WebTorrentClient | null = null;
+    let statsInterval: ReturnType<typeof setInterval> | null = null;
+
+    onMount(() => {
+        void boot();
+    });
+
+    onDestroy(() => {
+        if (statsInterval) {
+            clearInterval(statsInterval);
         }
+        client?.destroy();
+    });
 
-        if (infoHash) {
-            location.replace(`/?m=${infoHash}&n=${movieTitle}&t=${torrentFilePath}`);
+    async function boot() {
+        const urlParams = new URLSearchParams(window.location.search);
+        queryTerm = urlParams.get("q") ?? "";
+
+        if (queryTerm.startsWith("magnet:?")) {
+            redirectMagnetSearch(queryTerm);
             return;
         }
+
+        movieInfoHash = urlParams.get("m");
+        movieTitle = urlParams.get("n");
+
+        if (movieInfoHash) {
+            await playMovie(movieInfoHash, urlParams.get("magnet"));
+            return;
+        }
+
+        await searchMovies(queryTerm);
     }
 
-    movieInfoHash = urlParams.get("m");
-    const torrentFileUrl = urlParams.get("t");
-    if (movieInfoHash) {
+    function redirectMagnetSearch(magnet: string) {
+        const magnetParams = new URL(magnet).searchParams;
+        const infoHash = magnetParams
+            .getAll("xt")
+            .find((value) => value.startsWith("urn:btih:"))
+            ?.slice("urn:btih:".length)
+            .toUpperCase();
+
+        if (!infoHash) {
+            errorMessage = "That magnet link does not include a BitTorrent info hash.";
+            return;
+        }
+
+        const params = new URLSearchParams({
+            m: infoHash,
+            n: magnetParams.get("dn") ?? "",
+            magnet,
+        });
+        location.replace(`${location.pathname}?${params.toString()}`);
+    }
+
+    async function searchMovies(searchTerm: string) {
         loading = true;
-        movieTitle = urlParams.get("n") || "";
+        errorMessage = null;
 
-        const opts = {
-            announce: ["wss://tracker.btorrent.xyz", "wss://tracker.fastcast.nz", "wss://tracker.openwebtorrent.com"],
-        };
-
-        client.add(await getTorrent(movieInfoHash, torrentFileUrl), opts, (torrent: WebTorrent.Torrent) => {
-            // Got torrent metadata!
-            console.info("Client is downloading:", torrent.infoHash);
-
-            torrent.files.sort((a, b) => b.length - a.length);
-            for (const file of torrent.files) {
-                if (file.name.endsWith(".mp4")) {
-                    // Display the file by appending it to the DOM. Supports video, audio, images, and
-                    // more. Specify a container element (CSS selector or reference to DOM node).
-                    file.streamTo(videoEl);
-                    loading = false;
-                    break;
-                }
+        try {
+            const params = new URLSearchParams();
+            params.set("quality", "1080p");
+            params.set("sort_by", "year");
+            if (searchTerm) {
+                params.set("query_term", searchTerm);
             }
 
-            setInterval(() => {
-                torrentInfo = {
-                    downloadSpeed: torrent.downloadSpeed,
-                    uploadSpeed: torrent.uploadSpeed,
-                    progress: torrent.progress,
-                    numPeers: torrent.numPeers,
-                    downloaded: torrent.downloaded,
-                    length: torrent.length,
-                };
-            }, 1000);
-        });
+            const response = await fetch(`${ytsBaseUrl}/api/v2/list_movies.json?${params.toString()}`);
+            if (!response.ok) {
+                throw new Error(`YTS returned HTTP ${response.status}`);
+            }
 
-        return;
+            const responseBody = (await response.json()) as { data?: { movies?: Movie[] } };
+            movies = dedupeMovies(responseBody.data?.movies ?? []);
+        } catch (error) {
+            errorMessage = error instanceof Error ? error.message : "Movie search failed.";
+            movies = [];
+        } finally {
+            loading = false;
+        }
     }
 
-    const response = await fetch(
-        queryTerm === ""
-            ? "https://yts.mx/api/v2/list_movies.json?"
-            : `https://yts.mx/api/v2/list_movies.jsonp?query_term=${queryTerm}&quality=1080p&sort_by=year`,
-    );
-    const responseBody = (await response.json()) as { data: { movies: Movie[] } };
-    let dedupHistory: Set<number> = new Set();
-    for (let movie of responseBody.data.movies) {
-        if (dedupHistory.has(movie.id)) continue;
-        if (movie.torrents.length === 0) continue;
-        movie.torrents = movie.torrents.filter((torrent) => torrent.quality === "1080p");
-        movie.torrents.sort((a, b) => (a.type === b.type ? 0 : a.type === "bluray" ? -1 : 1));
-        movies.push(movie);
-        dedupHistory.add(movie.id);
+    function dedupeMovies(searchResults: Movie[]) {
+        const seen = new Set<number>();
+        const deduped: Movie[] = [];
+
+        for (const movie of searchResults) {
+            if (seen.has(movie.id)) {
+                continue;
+            }
+
+            const torrents = movie.torrents
+                .filter((torrent) => torrent.quality === "1080p")
+                .sort((a, b) => (a.type === b.type ? 0 : a.type === "bluray" ? -1 : 1));
+
+            if (torrents.length === 0) {
+                continue;
+            }
+
+            deduped.push({ ...movie, torrents });
+            seen.add(movie.id);
+        }
+
+        return deduped;
     }
-    movies = movies;
-    console.debug(movies);
-});
 
-async function getTorrent(infoHash: string, torrentFilePath: string | null): Promise<string | Buffer> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20_000); // timeout in 20 seconds
+    async function playMovie(infoHash: string, magnet: string | null) {
+        loading = true;
+        errorMessage = null;
 
-    if (torrentFilePath) {
         try {
-            const torrentResponse = await fetch(torrentFilePath, { signal: controller.signal });
-            clearTimeout(timeoutId);
-            return Buffer.from(await torrentResponse.arrayBuffer());
-        } catch (error) {}
+            const WebTorrent = await loadWebTorrent();
+            const webTorrentClient = new WebTorrent();
+            client = webTorrentClient;
+            await createWebTorrentServer();
+
+            webTorrentClient.add(magnet ?? (await getTorrent(infoHash)), { announce }, (torrent) => streamTorrent(torrent));
+        } catch (error) {
+            loading = false;
+            errorMessage = error instanceof Error ? error.message : "Could not start WebTorrent.";
+        }
     }
 
-    try {
-        const torrentResponse = await fetch(`https://yts.mx/torrent/download/${infoHash}`, {
-            signal: controller.signal,
+    async function loadWebTorrent() {
+        const webTorrentUrl = `${import.meta.env.BASE_URL}webtorrent.min.js`;
+
+        const response = await fetch(webTorrentUrl);
+        if (!response.ok) {
+            throw new Error(`Could not load WebTorrent browser bundle: HTTP ${response.status}`);
+        }
+
+        const moduleBlob = new Blob([await response.text()], { type: "text/javascript" });
+        const moduleUrl = URL.createObjectURL(moduleBlob);
+
+        const webTorrentModule = (await import(/* @vite-ignore */ moduleUrl)) as {
+            default: new () => WebTorrentClient;
+        };
+        URL.revokeObjectURL(moduleUrl);
+
+        return webTorrentModule.default;
+    }
+
+    async function createWebTorrentServer() {
+        if (!("serviceWorker" in navigator) || !client) {
+            return;
+        }
+
+        const registration = await navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.min.js`, {
+            scope: import.meta.env.BASE_URL,
         });
-        clearTimeout(timeoutId);
-        return Buffer.from(await torrentResponse.arrayBuffer());
-    } catch (error) {
-        return `magnet:?xt=urn:btih:${infoHash}`;
+        const worker = registration.active ?? registration.waiting ?? registration.installing;
+
+        if (!worker) {
+            return;
+        }
+
+        if (worker.state === "activated") {
+            client.createServer({ controller: registration });
+            return;
+        }
+
+        await new Promise<void>((resolve) => {
+            worker.addEventListener("statechange", () => {
+                if (worker.state === "activated") {
+                    client?.createServer({ controller: registration });
+                    resolve();
+                }
+            });
+        });
     }
-}
 
-//     async function getIpAndGeoInfo() {
-//         const [ip, dbWorker] = await Promise.all([
-//             getExternalIp(),
-//             loadGeoIpDb(),
-//         ]);
-//
-//         // convert ipv4 format to integer representation
-//         const ipv4 = ip.split('.').map(i => parseInt(i));
-//         const ipInteger = (ipv4[0] << 24) + (ipv4[1] << 16) + (ipv4[2] << 8) + ipv4[3] - 0x8000_0000;
-//
-//         const rows: Record<string, any>[] = await dbWorker.db.query(`
-// select latitude, longitude, locations.*
-// from networks_idx
-// join networks on networks_idx.id = networks.rowid
-// join locations on networks.geoname_id = locations.geoname_id
-// where ${ipInteger} between networks_idx.first_address and networks_idx.last_address`) as Record<string, any>[];
-//         console.debug(rows);
-//         if (rows.length === 0) {
-//             alert('failed to check vpn, be careful...');
-//             return {};
-//         }
-//
-//         const latitude = rows[0].latitude / 1e5;
-//         const longitude = rows[0].longitude / 1e5;
-//         return {...rows[0], ip, latitude, longitude};
-//     }
-//
-//     async function getExternalIp(): Promise<string> {
-//         const { ip } = await (await fetch('https://www.myexternalip.com/json')).json();
-//         return ip;
-//     }
-//
-//     async function loadGeoIpDb() {
-//         const { createDbWorker } = await import("sql.js-httpvfs");
-//         const workerUrl = new URL(
-//             "sql.js-httpvfs/dist/sqlite.worker.js",
-//             import.meta.url,
-//         );
-//         const wasmUrl = new URL(
-//             "sql.js-httpvfs/dist/sql-wasm.wasm",
-//             import.meta.url,
-//         );
-//         const config = {
-//             from: "inline",
-//             config: {
-//                 serverMode: "chunked", // file is just a plain old full sqlite database
-//                 urlPrefix: "geoip/db.sqlite3.",
-//                 serverChunkSize: 46137344,
-//                 requestChunkSize: 1024, // the page size of the  sqlite database (by default 4096)
-//                 databaseLengthBytes: 407158784,
-//             }
-//         };
-//         const worker = await createDbWorker(
-//             [config],
-//             workerUrl.toString(),
-//             wasmUrl.toString(),
-//             // maxBytesToRead // optional, defaults to Infinity
-//         );
-//         return worker;
-//     }
+    async function getTorrent(infoHash: string): Promise<string | Uint8Array> {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 20_000);
 
-function humanFileSize(size: number): string {
-    if (size < 1_000) {
-        return `${size.toFixed(2)} B`;
-    } else if (size < 1_000_000) {
-        return `${(size / 1_000).toFixed(2)} KB`;
-    } else if (size < 1_000_000_000) {
-        return `${(size / 1_000_000).toFixed(2)} MB`;
+        try {
+            const torrentResponse = await fetch(`${ytsBaseUrl}/torrent/download/${infoHash}`, {
+                signal: controller.signal,
+            });
+            if (!torrentResponse.ok) {
+                throw new Error(`Torrent download returned HTTP ${torrentResponse.status}`);
+            }
+            return new Uint8Array(await torrentResponse.arrayBuffer());
+        } catch {
+            return `magnet:?xt=urn:btih:${infoHash}`;
+        } finally {
+            clearTimeout(timeoutId);
+        }
     }
-    return `${(size / 1_000_000_000).toFixed(2)} GB`;
-}
 
-function humanElapsed(seconds: number): string | null {
-    if (!isFinite(seconds)) {
-        return null;
+    function streamTorrent(torrent: WebTorrentTorrent) {
+        const file = [...torrent.files]
+            .sort((a, b) => b.length - a.length)
+            .find((torrentFile) => /\.(mp4|m4v|webm|mkv)$/i.test(torrentFile.name));
+
+        if (!file) {
+            loading = false;
+            errorMessage = "No playable video file was found in this torrent.";
+            return;
+        }
+
+        if (!videoEl) {
+            loading = false;
+            errorMessage = "The video player is not ready yet.";
+            return;
+        }
+
+        file.streamTo(videoEl);
+        loading = false;
+        updateTorrentInfo(torrent);
+        statsInterval = setInterval(() => updateTorrentInfo(torrent), 1000);
     }
-    let minutes: number = Math.floor(seconds / 60);
-    seconds = Math.round(seconds % 60);
-    let hours = Math.floor(minutes / 60);
-    minutes = minutes % 60;
-    return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds
-        .toString()
-        .padStart(2, "0")}`;
-}
 
-function beforeUnload() {}
+    function updateTorrentInfo(torrent: WebTorrentTorrent) {
+        torrentInfo = {
+            downloadSpeed: torrent.downloadSpeed,
+            uploadSpeed: torrent.uploadSpeed,
+            progress: torrent.progress,
+            numPeers: torrent.numPeers,
+            downloaded: torrent.downloaded,
+            length: torrent.length,
+        };
+    }
+
+    function movieUrl(movie: Movie) {
+        const params = new URLSearchParams({
+            m: movie.torrents[0].hash,
+            n: movie.title,
+        });
+        return `${location.pathname}?${params.toString()}`;
+    }
+
+    function humanFileSize(size: number): string {
+        if (size < 1_000) {
+            return `${size.toFixed(2)} B`;
+        }
+        if (size < 1_000_000) {
+            return `${(size / 1_000).toFixed(2)} KB`;
+        }
+        if (size < 1_000_000_000) {
+            return `${(size / 1_000_000).toFixed(2)} MB`;
+        }
+        return `${(size / 1_000_000_000).toFixed(2)} GB`;
+    }
+
+    function humanElapsed(seconds: number): string | null {
+        if (!Number.isFinite(seconds)) {
+            return null;
+        }
+
+        let minutes = Math.floor(seconds / 60);
+        const roundedSeconds = Math.round(seconds % 60);
+        const hours = Math.floor(minutes / 60);
+        minutes %= 60;
+
+        return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${roundedSeconds
+            .toString()
+            .padStart(2, "0")}`;
+    }
 </script>
 
-<nav class="bg-gray-800 py-2 px-5 mb-4 flex">
-    <a class="hidden sm:block items-center justify-center inline-flex py-1.5 px-5 -ml-5 text-white" href="/">Home</a>
-    <form action="." method="GET" class="w-full">
-        <input name="q" type="search" class="rounded-full py-1.5 px-3 w-full" bind:value={queryTerm} placeholder="search">
-    </form>
+<svelte:head>
+    <title>{movieTitle || "BlackLaser"}</title>
+</svelte:head>
 
+<nav class="topbar">
+    <a class="brand" href={import.meta.env.BASE_URL}>BlackLaser</a>
+    <form action="." method="GET" class="search-form">
+        <input name="q" type="search" bind:value={queryTerm} placeholder="Search YTS or paste a magnet link" />
+    </form>
 </nav>
 
-<ul class="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-8 mx-3 text-sm">
-    {#each movies as movie}
-        <li title={movie.synopsis}>
-            <a class="block h-full p-2 hover:bg-gray-200" href={`?m=${movie.torrents[0].hash}&n=${encodeURIComponent(movie.title)}`}>
-                <img src={movie.medium_cover_image} alt="cover">
-                <p class="overflow-hidden whitespace-nowrap text-ellipsis">{ movie.title }</p>
-                <p class="text-sm">{ movie.year }</p>
-            </a>
-        </li>
-    {/each}
-</ul>
-
-{#if movieInfoHash}
-    <div class="grid justify-center">
-        <video bind:this={videoEl} src="" controls></video>
-        {#if loading}
-            <div class="text-center">loading...</div>
-        {/if}
-    </div>
-{/if}
-
-{#if movieTitle}
-    <h1 class="items-center justify-center inline-flex py-1.5 mx-5 my-5 font-semibold">{ movieTitle }</h1>
-{/if}
-
-{#if torrentInfo}
-    <div class="grid grid-cols-[10rem,auto] gap-x-4 gap-y-1 mx-5 font-mono text-sm">
-        <div>Download Speed</div>
-        <div>{ humanFileSize(torrentInfo.downloadSpeed) }/s</div>
-        <div>Upload Speed</div>
-        <div>{ humanFileSize(torrentInfo.uploadSpeed) }/s</div>
-        <div>Progress</div>
-        <div>{ (torrentInfo.progress * 100).toFixed(1) }%</div>
-        <div>Num Peers</div>
-        <div>{ torrentInfo.numPeers }</div>
-        <div>Downloaded</div>
-        <div>{ humanFileSize(torrentInfo.downloaded) }</div>
-        <div>Total Size</div>
-        <div>{ humanFileSize(torrentInfo.length) }</div>
-        <div>ETA</div>
-        <div>{ humanElapsed(((torrentInfo.length - torrentInfo.downloaded) / torrentInfo.downloadSpeed)) || '<TBD>' }</div>
-    </div>
-{/if}
-
-<div class="h-32"></div>
-
-<svelte:window on:beforeunload={beforeUnload} />
-
-<svelte:head>
-    {#if movieTitle}
-        <title>{ movieTitle }</title>
-    {:else}
-        <title>BlackLaser</title>
+<main>
+    {#if errorMessage}
+        <div class="notice error">{errorMessage}</div>
     {/if}
-</svelte:head>
+
+    {#if movieInfoHash}
+        <section class="player-shell">
+            <video bind:this={videoEl} controls playsinline></video>
+            {#if loading}
+                <div class="notice">Connecting to peers...</div>
+            {/if}
+        </section>
+    {:else}
+        {#if loading}
+            <div class="notice">Searching movies...</div>
+        {/if}
+
+        {#if movies.length > 0}
+            <ul class="movie-grid">
+                {#each movies as movie (movie.id)}
+                    <li title={movie.synopsis || movie.summary}>
+                        <a class="movie-card" href={movieUrl(movie)}>
+                            <img src={movie.medium_cover_image} alt={`${movie.title} cover`} loading="lazy" />
+                            <span class="movie-title">{movie.title}</span>
+                            <span class="movie-meta">{movie.year} · {movie.rating}/10 · {movie.torrents[0].size}</span>
+                        </a>
+                    </li>
+                {/each}
+            </ul>
+        {:else if !loading && queryTerm}
+            <div class="notice">No 1080p YTS results found for “{queryTerm}”.</div>
+        {/if}
+    {/if}
+
+    {#if movieTitle}
+        <h1>{movieTitle}</h1>
+    {/if}
+
+    {#if torrentInfo}
+        <dl class="stats">
+            <dt>Download Speed</dt>
+            <dd>{humanFileSize(torrentInfo.downloadSpeed)}/s</dd>
+            <dt>Upload Speed</dt>
+            <dd>{humanFileSize(torrentInfo.uploadSpeed)}/s</dd>
+            <dt>Progress</dt>
+            <dd>{(torrentInfo.progress * 100).toFixed(1)}%</dd>
+            <dt>Peers</dt>
+            <dd>{torrentInfo.numPeers}</dd>
+            <dt>Downloaded</dt>
+            <dd>{humanFileSize(torrentInfo.downloaded)}</dd>
+            <dt>Total Size</dt>
+            <dd>{humanFileSize(torrentInfo.length)}</dd>
+            <dt>ETA</dt>
+            <dd>{humanElapsed((torrentInfo.length - torrentInfo.downloaded) / torrentInfo.downloadSpeed) || "TBD"}</dd>
+        </dl>
+    {/if}
+</main>
+
+<style>
+    :global(*) {
+        box-sizing: border-box;
+    }
+
+    :global(body) {
+        margin: 0;
+        min-width: 320px;
+        background: #080b11;
+        color: #ecf2ff;
+        font-family:
+            Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    :global(a) {
+        color: inherit;
+    }
+
+    .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+        padding: 0.85rem clamp(1rem, 4vw, 2.5rem);
+        background: rgba(8, 11, 17, 0.88);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(18px);
+    }
+
+    .brand {
+        flex: 0 0 auto;
+        font-weight: 800;
+        letter-spacing: -0.04em;
+        text-decoration: none;
+    }
+
+    .search-form {
+        flex: 1;
+    }
+
+    input {
+        width: 100%;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 999px;
+        padding: 0.75rem 1rem;
+        background: rgba(255, 255, 255, 0.08);
+        color: inherit;
+        font: inherit;
+        outline: none;
+    }
+
+    input:focus {
+        border-color: #66e3ff;
+        box-shadow: 0 0 0 3px rgba(102, 227, 255, 0.16);
+    }
+
+    main {
+        width: min(1180px, 100%);
+        margin: 0 auto;
+        padding: clamp(1rem, 3vw, 2rem);
+    }
+
+    .movie-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: clamp(0.85rem, 2vw, 1.4rem);
+        padding: 0;
+        margin: 0;
+        list-style: none;
+    }
+
+    .movie-card {
+        display: grid;
+        gap: 0.45rem;
+        min-height: 100%;
+        padding: 0.55rem;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 1rem;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
+        text-decoration: none;
+        transition:
+            transform 160ms ease,
+            border-color 160ms ease;
+    }
+
+    .movie-card:hover {
+        transform: translateY(-3px);
+        border-color: rgba(102, 227, 255, 0.45);
+    }
+
+    .movie-card img {
+        width: 100%;
+        aspect-ratio: 2 / 3;
+        border-radius: 0.7rem;
+        object-fit: cover;
+        background: rgba(255, 255, 255, 0.08);
+    }
+
+    .movie-title {
+        overflow: hidden;
+        font-weight: 700;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .movie-meta {
+        color: #a8b3c7;
+        font-size: 0.82rem;
+    }
+
+    .player-shell {
+        display: grid;
+        justify-items: center;
+        gap: 1rem;
+    }
+
+    video {
+        width: min(100%, 1080px);
+        max-height: 72vh;
+        border-radius: 1rem;
+        background: #000;
+    }
+
+    h1 {
+        margin: 1.25rem 0;
+        font-size: clamp(1.4rem, 4vw, 2.5rem);
+        letter-spacing: -0.04em;
+    }
+
+    .notice {
+        margin: 1rem 0;
+        padding: 0.9rem 1rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 0.9rem;
+        background: rgba(255, 255, 255, 0.07);
+        color: #cbd6ea;
+    }
+
+    .error {
+        border-color: rgba(255, 113, 113, 0.38);
+        background: rgba(255, 113, 113, 0.12);
+        color: #ffd7d7;
+    }
+
+    .stats {
+        display: grid;
+        grid-template-columns: minmax(8rem, max-content) 1fr;
+        gap: 0.45rem 1rem;
+        width: min(100%, 34rem);
+        padding: 1rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 1rem;
+        background: rgba(255, 255, 255, 0.06);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 0.92rem;
+    }
+
+    dt {
+        color: #a8b3c7;
+    }
+
+    dd {
+        margin: 0;
+    }
+
+    @media (max-width: 600px) {
+        .topbar {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .movie-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+</style>

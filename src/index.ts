@@ -1,15 +1,13 @@
-import { Buffer } from "node:buffer";
+import { mount } from "svelte";
+import App from "./App.svelte";
+import "./style.css";
 
-async function main() {
-    const App = await import("./App.svelte");
-    console.debug("App", App);
+const target = document.querySelector("#app");
 
-    const appEl = document.querySelector("#app") as HTMLDivElement;
-    appEl.classList.remove("hidden");
-
-    const app = new App.default({
-        target: appEl,
-    });
+if (!(target instanceof HTMLElement)) {
+    throw new Error("Could not find app mount point.");
 }
 
-main();
+mount(App, {
+    target,
+});
